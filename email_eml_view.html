@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>.EML Email Viewer</title>
+<style>
+body { font-family: Arial, sans-serif; margin:0; padding:0; background:#f1f3f4; }
+.container { max-width: 900px; margin: 30px auto; }
+#dropZone {
+    border: 2px dashed #ccc;
+    padding: 30px;
+    text-align: center;
+    color: #888;
+    cursor: pointer;
+    border-radius: 8px;
+    background: #fff;
+}
+#dropZone.hover { border-color: #666; color: #333; }
+#emailContent { background:#fff; border-radius: 8px; padding: 20px; margin-top: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.header-item { margin-bottom: 8px; word-wrap: break-word; }
+.label { font-weight: bold; }
+.header-item a { text-decoration: none; color: #1a73e8; }
+.attachments { margin-top: 20px; }
+.attachments img { max-width: 200px; margin: 5px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; transition: transform 0.2s; }
+.attachments img:hover { transform: scale(1.05); }
+#printBtn { margin-top: 20px; padding: 10px 20px; cursor: pointer; border:none; background:#1a73e8; color:#fff; border-radius:4px; font-weight:bold; }
+#modal {
+    display:none;
+    position:fixed;
+    top:0; left:0; right:0; bottom:0;
+    background: rgba(0,0,0,0.8);
+    justify-content:center;
+    align-items:center;
+    z-index:1000;
+}
+#modal img { max-width:90%; max-height:90%; border-radius:8px; }
+.forwarded { border-left: 3px solid #1a73e8; margin: 10px 0; padding-left: 10px; background: #f9f9f9; }
+
+/* Print-specific styles */
+@media print {
+    body { background: #fff; color: #000; }
+    #emailContent a { color: black; text-decoration: none; } /* links appear black */
+    #emailContent img { max-width: 100%; } /* images scale */
+    #printBtn, #dropZone { display: none; } /* hide buttons/drop area */
+}
+</style>
+</head>
+<body>
+<div class="container">
+<h2>.EML File Viewer (Drag & Drop or Click)</h2>
+
+<div id="dropZone">Drag and drop a .eml file here or click to select</div>
+<input type="file" id="fileInput" accept=".eml" style="display:none;">
+<button id="printBtn" onclick="printEmail()">Print Email</button>
+
+<div id="emailContent"></div>
+</div>
+
+<div id="modal" onclick="closeModal()"><img id="modalImg" src=""></div>
+
+<script>
+const dropZone = document.getElementById('dropZone');
+const fileInput = document.getElementById('fileInput');
+const modal = document.getElementById('modal');
+const modalImg = document.getElementById('modalImg');
+
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('hover'); });
+dropZone.addEventListener('dragleave', e => { e.preventDefault(); dropZone.classList.remove('hover'); });
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('hover'); const file = e.dataTransfer.files[0]; if(file && file.name.endsWith('.eml')) openEML(file); });
+fileInput.addEventListener('change', () => { const file = fileInput.files[0]; if(file && file.name.endsWith('.eml')) openEML(file); });
+
+let currentEmailContent = "";
+
+// Helper: unfold headers (join folded lines)
+function unfoldHeaders(rawHeaders){
+    return rawHeaders.replace(/\r?\n[ \t]+/g, ' ');
+}
+
+// Convert email header values to clickable display name + email format
+function formatEmails(headerValue){
+    if(!headerValue) return "";
+    return headerValue.split(",").map(e => {
+        e = e.trim();
+        let name = e.match(/(.*)<.*>/);
+        let email = e.match(/<([^>]+)>/);
+        if(name && email){
+            return `<a href="mailto:${email[1]}">${name[1].trim()} &lt;${email[1]}&gt;</a>`;
+        } else {
+            return `<a href="mailto:${e}">${e}</a>`;
+        }
+    }).join(", ");
+}
+
+async function openEML(file){
+    const text = await file.text();
+    const parts = text.split(/\r?\n\r?\n/);
+    const rawHeaders = unfoldHeaders(parts[0]);
+    const rawBody = parts.slice(1).join("\n\n");
+
+    const headers = {};
+    rawHeaders.split(/\r?\n/).forEach(line => {
+        const idx = line.indexOf(":");
+        if(idx > -1){ 
+            const key = line.slice(0,idx).trim(); 
+            const value = line.slice(idx+1).trim(); 
+            headers[key.toLowerCase()] = value; // lowercase keys for consistency
+        }
+    });
+
+    const boundaryMatch = rawHeaders.match(/boundary="?([^"\r\n]+)"?/i);
+    let bodyContent = "";
+    const attachments = [];
+    const inlineImages = {};
+    const contentLocationImages = {};
+
+    if(boundaryMatch){
+        const boundary = boundaryMatch[1];
+        const boundaryParts = rawBody.split(new RegExp("--" + boundary));
+        boundaryParts.forEach(part => {
+            if(!part || part.trim() === "--") return;
+            const contentTypeMatch = part.match(/Content-Type:\s*([^\r\n;]+)/i);
+            const dispositionMatch = part.match(/Content-Disposition:\s*([^\r\n;]+)/i);
+            const contentIDMatch = part.match(/Content-ID:\s*<([^>]+)>/i);
+            const contentLocationMatch = part.match(/Content-Location:\s*([^\r\n]+)/i);
+            const dataMatch = part.split(/\r?\n\r?\n/)[1];
+
+            if(dispositionMatch && dispositionMatch[1].toLowerCase().includes("inline") && contentIDMatch && dataMatch){
+                const blob = new Blob([Uint8Array.from(atob(dataMatch.replace(/\r?\n/g,"")), c=>c.charCodeAt(0))], {type: contentTypeMatch ? contentTypeMatch[1] : "application/octet-stream"});
+                inlineImages[contentIDMatch[1]] = URL.createObjectURL(blob);
+            } else if(contentLocationMatch && dataMatch){
+                const blob = new Blob([Uint8Array.from(atob(dataMatch.replace(/\r?\n/g,"")), c=>c.charCodeAt(0))], {type: contentTypeMatch ? contentTypeMatch[1] : "application/octet-stream"});
+                contentLocationImages[contentLocationMatch[1].trim()] = URL.createObjectURL(blob);
+            } else if(dispositionMatch && dispositionMatch[1].toLowerCase().includes("attachment") && dataMatch){
+                const filenameMatch = part.match(/filename="(.+?)"/i);
+                if(filenameMatch){
+                    try{
+                        const filename = filenameMatch[1];
+                        const blob = new Blob([Uint8Array.from(atob(dataMatch.replace(/\r?\n/g,"")), c=>c.charCodeAt(0))], {type: contentTypeMatch ? contentTypeMatch[1] : "application/octet-stream"});
+                        attachments.push({filename, url: URL.createObjectURL(blob), type: contentTypeMatch ? contentTypeMatch[1] : ""});
+                    }catch(e){}
+                }
+            } else{
+                if(!bodyContent){
+                    if(part.includes("<html")) bodyContent = part.slice(part.indexOf("<html"));
+                    else if(part.includes("<!DOCTYPE html")) bodyContent = part.slice(part.indexOf("<!DOCTYPE html"));
+                    else bodyContent = "<pre>" + part.replace(/[&<>]/g, x => ({ "&":"&amp;","<":"&lt;",">":"&gt;" })[x]) + "</pre>";
+                }
+            }
+        });
+    } else{
+        if(rawBody.includes("<html")) bodyContent = rawBody.slice(rawBody.indexOf("<html"));
+        else if(rawBody.includes("<!DOCTYPE html")) bodyContent = rawBody.slice(rawBody.indexOf("<!DOCTYPE html"));
+        else bodyContent = "<pre>" + rawBody.replace(/[&<>]/g, x => ({ "&":"&amp;","<":"&lt;",">":"&gt;" })[x]) + "</pre>";
+    }
+
+    // Replace inline images
+    for(const cid in inlineImages){
+        const regex = new RegExp('src=["\']cid:' + cid + '["\']', 'gi');
+        bodyContent = bodyContent.replace(regex, 'src="' + inlineImages[cid] + '"');
+    }
+    for(const loc in contentLocationImages){
+        const regex = new RegExp('src=["\']' + loc.replace(/[-\/\\^$*+?.()|[\]{}]/g,'\\$&') + '["\']', 'gi');
+        bodyContent = bodyContent.replace(regex, 'src="' + contentLocationImages[loc] + '"');
+    }
+
+    bodyContent = bodyContent.replace(/--=_Part_\d+_\d+\.\d+--\s*$/g,'').replace(/--\s*$/g,'').trim();
+
+    // Highlight forwarded/replied emails
+    bodyContent = bodyContent.replace(/(From:.*\nTo:.*\nSubject:.*)/gi, '<div class="forwarded">$1</div>');
+
+    let attachmentsHTML = "";
+    if(attachments.length > 0){
+        attachmentsHTML = attachments.map(a => {
+            if(a.type.startsWith("image/")){
+                return `<div><img src="${a.url}" alt="${a.filename}" onclick="openModal('${a.url}')"><a href="${a.url}" download="${a.filename}">${a.filename}</a></div>`;
+            } else {
+                return `<div><a href="${a.url}" download="${a.filename}">${a.filename}</a></div>`;
+            }
+        }).join("");
+    } else attachmentsHTML = "No attachments found";
+
+    currentEmailContent = `
+        <div class="header-item"><span class="label">From:</span> ${formatEmails(headers["from"])}</div>
+        <div class="header-item"><span class="label">To:</span> ${formatEmails(headers["to"])}</div>
+        <div class="header-item"><span class="label">CC:</span> ${formatEmails(headers["cc"])}</div>
+        <div class="header-item"><span class="label">BCC:</span> ${formatEmails(headers["bcc"])}</div>
+        <div class="header-item"><span class="label">Subject:</span> ${headers["subject"]||""}</div>
+        <div class="header-item"><span class="label">Date:</span> ${headers["date"]||""}</div>
+
+        <h3>Message</h3>${bodyContent}
+
+        <div class="attachments">
+            <h3>Attachments</h3>${attachmentsHTML}
+        </div>
+    `;
+
+    document.getElementById("emailContent").innerHTML = currentEmailContent;
+}
+
+function openModal(src){
+    modal.style.display = "flex";
+    modalImg.src = src;
+}
+function closeModal(){ modal.style.display = "none"; }
+
+function printEmail(){
+    const printWindow = window.open('', '', 'width=900,height=700');
+    printWindow.document.write('<html><head><title>Email Print</title></head><body>');
+    printWindow.document.write(currentEmailContent);
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+}
+</script>
+</body>
+</html>
